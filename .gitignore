@@ -1,0 +1,10 @@
+# build output
+/xmrtui
+*.exe
+
+# never commit wallet data or logs
+*.keys
+*.address.txt
+*.log
+wallet*
+!wallet*.go
