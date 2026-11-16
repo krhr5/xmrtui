@@ -697,11 +697,37 @@ func (m model) View() string {
 }
 
 func (m model) viewHeader(cw int) string {
-	scale := 1
-	if m.h >= 38 && pixelWidth("MONERO", 2, true)+30 <= cw {
-		scale = 2
+	// Heading options, largest first; the first that fits the width wins.
+	// Window widths are cw+4 (the side margins).
+	grad := gradient(cOrangeHi, cOrangeLo)
+	ansiShadow := shadowArt(moneroWordmark, grad, "#9A3D00")
+	pixel5x7 := pixelText("MONERO", 1, grad, cShadow)
+	pixel3x5 := small.render("MONERO", 1, grad, "")
+	options := []struct {
+		word  string
+		sym   int // Monero symbol size in pixels (0 = none)
+		minCW int
+	}{
+		{ansiShadow, 12, 0}, // 73+ cols: full symbol
+		{ansiShadow, 8, 0},  // 69-72: smaller symbol
+		{pixel5x7, 8, 0},    // 50-68: symbol kept, Pixel 5x7
+		{pixel5x7, 0, 0},    // 40-49
+		{pixel3x5, 0, 0},    // under 40
 	}
-	logo := pixelText("MONERO", scale, gradient(cOrangeHi, cOrangeLo), cShadow)
+	logo := pixel3x5
+	for _, o := range options {
+		w := lipgloss.Width(o.word)
+		if o.sym > 0 {
+			w += o.sym + 2
+		}
+		if w <= cw && cw >= o.minCW {
+			logo = o.word
+			if o.sym > 0 {
+				logo = lipgloss.JoinHorizontal(lipgloss.Center, moneroSymbol(o.sym), "  ", o.word)
+			}
+			break
+		}
+	}
 
 	dot, state := errStyle.Render("●"), "offline"
 	switch {
@@ -717,24 +743,33 @@ func (m model) viewHeader(cw int) string {
 		dimStyle.Render(short(m.daemonAddr, 34)),
 		dot+" "+textStyle.Render(state),
 	)
-	gap := cw - lipgloss.Width(logo) - lipgloss.Width(info)
-	if gap < 2 {
-		return logo
+	if gap := cw - lipgloss.Width(logo) - lipgloss.Width(info); gap >= 2 {
+		logo = lipgloss.JoinHorizontal(lipgloss.Bottom, logo, strings.Repeat(" ", gap), info)
 	}
-	return lipgloss.JoinHorizontal(lipgloss.Bottom, logo, strings.Repeat(" ", gap), info) + "\n"
+	// One blank line of breathing room above the logo, one below.
+	return "\n" + logo + "\n"
 }
 
 func (m model) viewTabs(cw int) string {
-	var parts []string
-	for i, n := range tabNames {
-		label := fmt.Sprintf("%d %s", i+1, n)
-		if tab(i) == m.tab {
-			parts = append(parts, tabOn.Render(label))
-		} else {
-			parts = append(parts, tabOff.Render(label))
+	render := func(names []string) string {
+		var parts []string
+		for i, n := range names {
+			label := fmt.Sprintf("%d %s", i+1, n)
+			if tab(i) == m.tab {
+				parts = append(parts, tabOn.Render(label))
+			} else {
+				parts = append(parts, tabOff.Render(label))
+			}
 		}
+		return strings.Join(parts, " ")
 	}
-	row := strings.Join(parts, " ")
+	row := render(tabNames)
+	if lipgloss.Width(row) > cw {
+		row = render([]string{"OVER", "HIST", "RECV", "SEND", "NODE"})
+	}
+	if lipgloss.Width(row) > cw {
+		row = render([]string{"", "", "", "", ""})
+	}
 	rule := lipgloss.NewStyle().Foreground(lipgloss.Color(cFrame)).Render(strings.Repeat("▀", max(0, cw)))
 	return row + "\n" + rule
 }
@@ -776,7 +811,13 @@ func (m model) viewFooter(cw int) string {
 		add("r", "refresh")
 		add("q", "quit")
 	}
-	left := strings.Join(hints, dimStyle.Render("  ·  "))
+	sep := dimStyle.Render("  ·  ")
+	left := strings.Join(hints, sep)
+	// Too narrow: drop hints from the middle, always keeping the last (quit).
+	for len(hints) > 1 && lipgloss.Width(left) > cw {
+		hints = append(hints[:len(hints)-2], hints[len(hints)-1])
+		left = strings.Join(hints, sep)
+	}
 
 	var right string
 	if m.status != "" && time.Since(m.statusAt) < 8*time.Second {
@@ -821,16 +862,23 @@ func (m model) viewOverview(cw, h int) string {
 		netW = cw - balW - 1
 	}
 
-	// Balance in big pixels, falling back gracefully when narrow.
-	big := fmtXMRShort(m.bal.Balance)
+	// Balance in the big pixel font; the small blocky font only when the
+	// panel is too narrow for it, then plain text as a last resort.
+	amount := fmtXMRShort(m.bal.Balance)
 	inner := balW - 6
-	var bigView string
-	if pixelWidth(big, 1, false)+pixelWidth("XMR", 1, false)+2 <= inner {
-		num := pixelText(big, 1, gradient(cOrangeHi, cOrangeLo), "")
-		unit := pixelText("XMR", 1, func(int, int) string { return cGrey }, "")
-		bigView = lipgloss.JoinHorizontal(lipgloss.Top, num, "  ", unit)
-	} else {
-		bigView = accentStyle.Render(big + " XMR")
+	bigView := accentStyle.Render(amount + " XMR")
+	for _, f := range []pixelFont{big, small} {
+		if f.width(amount, 1, false)+f.width("XMR", 1, false)+2 <= inner {
+			num := f.render(amount, 1, gradient(cOrangeHi, cOrangeLo), "")
+			unit := f.render("XMR", 1, func(int, int) string { return cGrey }, "")
+			bigView = lipgloss.JoinHorizontal(lipgloss.Top, num, "  ", unit)
+			break
+		}
+		if f.h == small.h && f.width(amount, 1, false)+5 <= inner {
+			num := f.render(amount, 1, gradient(cOrangeHi, cOrangeLo), "")
+			bigView = lipgloss.JoinHorizontal(lipgloss.Bottom, num, dimStyle.Render(" XMR"))
+			break
+		}
 	}
 	locked := m.bal.Balance - m.bal.Unlocked
 	rows := []string{
@@ -848,8 +896,16 @@ func (m model) viewOverview(cw, h int) string {
 		network := panel("NETWORK", m.syncBlock(netW-6), netW, false)
 		top = lipgloss.JoinHorizontal(lipgloss.Top, balance, " ", network)
 	} else {
-		rows = append(rows, "", m.syncLine(balW-6))
-		top = panel("BALANCE", strings.Join(rows, "\n"), balW, true)
+		// Too narrow for side by side: stack the network panel underneath,
+		// or fold sync status into the balance panel if height is tight.
+		balance := panel("BALANCE", strings.Join(rows, "\n"), balW, true)
+		network := panel("NETWORK", m.syncBlock(netW-6), netW, false)
+		if lipgloss.Height(balance)+lipgloss.Height(network) <= h {
+			top = lipgloss.JoinVertical(lipgloss.Left, balance, network)
+		} else {
+			rows = append(rows, "", m.syncLine(balW-6))
+			top = panel("BALANCE", strings.Join(rows, "\n"), balW, true)
+		}
 	}
 
 	addr := ""
